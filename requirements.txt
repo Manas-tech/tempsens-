@@ -1,0 +1,6 @@
+streamlit
+pdfplumber
+rapidfuzz
+pandas
+python-dotenv
+google-generativeai
