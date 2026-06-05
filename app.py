@@ -11,7 +11,10 @@ import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+try:
+    GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 
 _ANSI = re.compile(r'\033\[[0-9;]*m')
 def _strip(s): return _ANSI.sub('', s)
