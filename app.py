@@ -139,17 +139,15 @@ st.header("2️⃣  Results")
 
 total  = len(reports)
 passed = sum(1 for r in reports if r.overall_pass)
-gcalls = sum(1 for r in reports if r.gemini_used)
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3 = st.columns(3)
 m1.metric("Sub-PDFs checked", total)
 m2.metric(
     "Fully passed", f"{passed} / {total}",
     delta="all clear" if passed == total else f"{total - passed} with failures",
     delta_color="off" if passed == total else "inverse",
 )
-m3.metric("Gemini calls used", gcalls)
-m4.download_button(
+m3.download_button(
     "⬇  Download JSON report",
     data=json_bytes,
     file_name="validation_report.json",
@@ -175,9 +173,8 @@ if main_bom:
 st.subheader("Sub-PDF Reports")
 
 for rep in reports:
-    icon   = "✅" if rep.overall_pass else "❌"
-    ai_tag = "  🤖 Gemini" if rep.gemini_used else ""
-    label  = f"{icon}  {rep.sub_pdf}{ai_tag}"
+    icon  = "✅" if rep.overall_pass else "❌"
+    label = f"{icon}  {rep.sub_pdf}"
 
     with st.expander(label, expanded=True):
         if not rep.matched_bom_item:
@@ -197,7 +194,6 @@ for rep in reports:
             "Expected (BOM)":  r.main_value,
             "Found (Drawing)": r.sub_value,
             "Similarity":      f"{r.similarity:.0f}%",
-            "AI":              "🤖" if r.gemini_resolved else "",
         } for r in rep.results]
 
         df = pd.DataFrame(rows)
