@@ -21,7 +21,7 @@ Gemini key: --gemini-key  OR  env var GEMINI_API_KEY
 ────────────────────────────────────────────────────────────────
 """
 
-import json, re, sys, os, argparse
+import json, re, sys, os, argparse, io
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -44,12 +44,20 @@ MIN_SPEC_FIELDS = 5  # below this → Gemini used for main PDF spec
 class BOMItem:
     sr_no:str=""; description:str=""; quantity:str=""
     material:str=""; size:str=""; remarks:str=""
+    gad_row_ref:Optional[dict]=None   # {"page":int, "bbox":[x0,top,x1,bottom]} in the GAD
 
 @dataclass
 class ValidationResult:
     field:str; main_value:str; sub_value:str
     match:bool; similarity:float
     note:str=""; gemini_resolved:bool=False
+    gad_ref:Optional[dict]=None       # where main_value is shown in the GAD
+
+@dataclass
+class OrphanValue:
+    """A value found in the sub-PDF that never paired with a recognized label."""
+    value:str
+    gad_ref:Optional[dict]=None
 
 @dataclass
 class SubPDFReport:
@@ -59,6 +67,7 @@ class SubPDFReport:
     overall_pass:bool=False
     sub_kv:dict = field(default_factory=dict)
     gemini_used:bool=False
+    orphan_values:list = field(default_factory=list)
 
 # ── STEP 1: raw extraction ────────────────────────────────────
 
@@ -74,6 +83,178 @@ def extract_raw(path:str) -> tuple[str, list[list]]:
                     if any(cleaned):
                         rows.append(cleaned)
     return "\n".join(full_text), rows
+
+# ── STEP 1b: GAD word-position index (for "View in GAD" highlight) ──
+
+def index_words(path:str) -> list[dict]:
+    """Every word in the GAD with its page + bounding box, used to locate
+    where a BOM/field value (or a label-less orphan value) is shown.
+    Some CAD-exported PDFs carry off-canvas leftover content (negative or
+    out-of-page coordinates, sometimes even mirrored text) -- skip anything
+    outside the visible page so it can never be matched or highlighted."""
+    words = []
+    with pdfplumber.open(path) as pdf:
+        for pno, page in enumerate(pdf.pages, start=1):
+            for w in page.extract_words():
+                if w["x0"] < -1 or w["top"] < -1 or \
+                   w["x1"] > page.width + 1 or w["bottom"] > page.height + 1:
+                    continue
+                words.append({
+                    "page": pno, "text": w["text"],
+                    "x0": w["x0"], "top": w["top"],
+                    "x1": w["x1"], "bottom": w["bottom"],
+                })
+    return words
+
+def _row_words(gad_words:list[dict], page:int, top:float, tol:float=2.0) -> list[dict]:
+    return sorted(
+        (w for w in gad_words if w["page"] == page and abs(w["top"] - top) <= tol),
+        key=lambda w: w["x0"]
+    )
+
+def _row_bbox(words:list[dict]) -> list[float]:
+    return [min(w["x0"] for w in words), min(w["top"] for w in words),
+            max(w["x1"] for w in words), max(w["bottom"] for w in words)]
+
+def locate_bom_row(sr_no:str, description:str, gad_words:list[dict]) -> Optional[dict]:
+    """Anchor a BOM row to its location in the GAD: find the sr_no immediately
+    followed, on the same line, by the first word of its description."""
+    if not description or not sr_no:
+        return None
+    first_word = description.split()[0].upper()
+    sr_target  = _code_norm(sr_no)
+    for w in gad_words:
+        if not w["text"].strip().isdigit() or _code_norm(w["text"]) != sr_target:
+            continue
+        same_line = [o for o in gad_words
+                     if o["page"] == w["page"] and abs(o["top"] - w["top"]) <= 1.5
+                     and o["x0"] > w["x0"]]
+        same_line.sort(key=lambda o: o["x0"])
+        if same_line and same_line[0]["text"].upper() == first_word and \
+           same_line[0]["x0"] - w["x1"] < 100:
+            return {"page": w["page"], "bbox": _row_bbox(_row_words(gad_words, w["page"], w["top"]))}
+    return None
+
+def find_field_bbox(field_value:str, row_ref:Optional[dict], gad_words:list[dict]) -> Optional[dict]:
+    """Find the exact cell for a field's value within its BOM row's line.
+    Falls back to the whole-row bbox if the value can't be isolated.
+
+    Purely-numeric targets (e.g. QUANTITY="1") are matched against a single
+    whole word only -- never a substring spanning a word-concatenation join
+    (e.g. sr_no "11" + "TERMINAL" + "BOX" concatenates to "...BOX", and the
+    *next* cell "1" would otherwise look like a clean suffix match of that
+    string purely by coincidence of where the words happen to join)."""
+    if not row_ref or not field_value:
+        return row_ref
+    target = _code_norm(field_value)
+    if not target:
+        return row_ref
+    page, (x0, top, x1, bottom) = row_ref["page"], row_ref["bbox"]
+    row = _row_words(gad_words, page, top)
+
+    if target.isdigit():
+        for w in row:
+            if _code_norm(w["text"]) == target:
+                return {"page": page, "bbox": [w["x0"], w["top"], w["x1"], w["bottom"]]}
+        return row_ref
+
+    # The leftmost cell is always the sr_no column -- never part of a text
+    # field's value, so excluding it keeps e.g. MATERIAL/DESCRIPTION boxes
+    # from bleeding into the sr_no cell when the row starts with a digit.
+    search_row = row[1:] if row and row[0]["text"].strip().isdigit() else row
+    for i in range(len(search_row)):
+        acc = ""
+        for j in range(i, min(i + 6, len(search_row))):
+            acc += _code_norm(search_row[j]["text"])
+            if acc == target or target in acc:
+                return {"page": page, "bbox": _row_bbox(search_row[i:j + 1])}
+            if len(acc) > len(target) + 10:
+                break
+    return row_ref
+
+def _num_norm(s:str) -> str:
+    """Keep only digits and the decimal point -- orphan values are numeric/
+    dimensional, so letters must never let e.g. '125' match inside '3125W'."""
+    return re.sub(r'[^0-9.]', '', s)
+
+def find_value_anywhere(value:str, gad_words:list[dict]) -> Optional[dict]:
+    """Locate a label-less orphan value verbatim anywhere in the GAD.
+    Prefers an exact normalized match; falls back to a boundary-safe
+    substring match (rejects matches glued to another digit, e.g. '125'
+    inside '3125', so we don't highlight an unrelated number)."""
+    target = _num_norm(value)
+    if len(target) < 2:
+        return None
+    for w in gad_words:
+        if _num_norm(w["text"]) == target:
+            return {"page": w["page"], "bbox": [w["x0"], w["top"], w["x1"], w["bottom"]]}
+    best, best_len = None, None
+    for w in gad_words:
+        wn = _num_norm(w["text"])
+        idx = wn.find(target)
+        if idx == -1:
+            continue
+        before = wn[idx - 1] if idx > 0 else ""
+        after  = wn[idx + len(target)] if idx + len(target) < len(wn) else ""
+        if before.isdigit() or after.isdigit():
+            continue
+        if best_len is None or len(wn) < best_len:
+            best, best_len = w, len(wn)
+    if best:
+        return {"page": best["page"], "bbox": [best["x0"], best["top"], best["x1"], best["bottom"]]}
+    return None
+
+def render_highlight(gad_pdf, ref:dict, crop_pad:float=180, full_page:bool=False,
+                      resolution:int=150) -> bytes:
+    """Render the GAD page at `ref` with a translucent highlighter-style
+    overlay on the bbox (text stays readable underneath, unlike an opaque
+    box). Returns PNG bytes for direct display.
+    `gad_pdf` may be a file path or a file-like object (e.g. io.BytesIO).
+    `full_page=True` renders the entire page instead of a cropped window
+    around the bbox -- lets the UI offer pan/zoom over the whole drawing."""
+    page_no = ref["page"]
+    x0, top, x1, bottom = ref["bbox"]
+    pad = 1.5   # slight overflow past the text edges, like a real highlighter
+    hl_box = (x0 - pad, top - pad, x1 + pad, bottom + pad)
+    with pdfplumber.open(gad_pdf) as pdf:
+        page = pdf.pages[page_no - 1]
+        if full_page:
+            target = page
+        else:
+            crop_box = (
+                max(0, x0 - crop_pad), max(0, top - crop_pad),
+                min(page.width, x1 + crop_pad), min(page.height, bottom + crop_pad),
+            )
+            target = page.crop(crop_box)
+        im = target.to_image(resolution=resolution)
+        im.draw_rect(hl_box, stroke=(255, 200, 0, 220), stroke_width=1,
+                     fill=(255, 255, 0, 90))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+def attach_bom_refs(bom:list[BOMItem], gad_words:list[dict]) -> None:
+    for item in bom:
+        item.gad_row_ref = locate_bom_row(item.sr_no, item.description, gad_words)
+
+# ── STEP 1c: orphan (label-less) value detection ────────────────
+
+_ORPHAN_NUM_RE = re.compile(r'(?<![\w./])(?:\d{1,4}\.\d{1,3}|\d{2,4})(?![\w./])')
+
+def extract_orphan_values(sub_text:str, sub_kv:dict) -> list[str]:
+    """Standalone numeric/dimensional tokens in the sub-PDF that never made
+    it into a labeled KV pair -- e.g. a bare dimension callout drawn directly
+    on the component view with no adjacent key (like the '12.5'/'0.1' that
+    make up an unlabeled 'O 12.5 +/- 0.1' size callout)."""
+    known_values = " | ".join(sub_kv.values())
+    seen, orphans = set(), []
+    for m in _ORPHAN_NUM_RE.finditer(sub_text):
+        tok = m.group(0)
+        if tok in seen or tok in known_values:
+            continue
+        seen.add(tok)
+        orphans.append(tok)
+    return orphans
 
 # ── STEP 2: regex KV extraction ───────────────────────────────
 
@@ -437,7 +618,7 @@ def _find_in_kv(query:str, kv:dict, threshold=45) -> tuple[str,str,float]:
         return r[0], kv[r[0]], r[1]
     return "","",0.0
 
-def validate(bom_item:BOMItem, sub_kv:dict) -> list[ValidationResult]:
+def validate(bom_item:BOMItem, sub_kv:dict, gad_words:Optional[list[dict]]=None) -> list[ValidationResult]:
     results = []
     bom_values = {
         "description": bom_item.description,
@@ -459,11 +640,14 @@ def validate(bom_item:BOMItem, sub_kv:dict) -> list[ValidationResult]:
             if ks > best_key_score:
                 best_key, best_val, best_key_score = k, v, ks
 
+        gad_ref = (find_field_bbox(bom_val, bom_item.gad_row_ref, gad_words)
+                   if gad_words else None)
+
         if not best_val:
             results.append(ValidationResult(
                 field=field_name.upper(), main_value=bom_val,
                 sub_value="— NOT FOUND —", match=False, similarity=0.0,
-                note="Field not found in sub-PDF"
+                note="Field not found in sub-PDF", gad_ref=gad_ref
             ))
             continue
 
@@ -479,7 +663,8 @@ def validate(bom_item:BOMItem, sub_kv:dict) -> list[ValidationResult]:
         results.append(ValidationResult(
             field=field_name.upper(), main_value=bom_val,
             sub_value=used_val, match=match, similarity=sim,
-            note=f"matched key='{best_key}' (key_score={best_key_score:.0f})"
+            note=f"matched key='{best_key}' (key_score={best_key_score:.0f})",
+            gad_ref=gad_ref
         ))
     return results
 
@@ -526,6 +711,7 @@ def gemini_retry_failed(
             similarity    = sim,
             note          = f"resolved by Gemini (regex had: '{r.sub_value}')",
             gemini_resolved = True,
+            gad_ref       = r.gad_ref,
         ))
         status = ok("PASS") if match else err("FAIL")
         print(f"  Gemini re-check {r.field}: {status} "
@@ -654,6 +840,7 @@ Include every field from the table above. Use the exact FIELD_NAME (e.g. "SIZE",
             similarity      = new_sim,
             note            = f"final-judge: {reason}",
             gemini_resolved = True,
+            gad_ref         = r.gad_ref,
         ))
 
     return corrected, True
@@ -725,6 +912,7 @@ def save_json(spec, bom, reports, path, gemini_calls):
                 "gemini_used":      r.gemini_used,
                 "sub_kv_extracted": r.sub_kv,
                 "validation_results": [asdict(v) for v in r.results],
+                "orphan_values":    [asdict(o) for o in r.orphan_values],
             }
             for r in reports
         ],
@@ -752,6 +940,7 @@ def run(main_pdf:str, sub_pdfs:list[str],
     main_text, main_rows = extract_raw(main_pdf)
     main_spec = regex_extract_kv(main_text, main_rows)
     main_bom  = parse_bom_regex(main_rows)
+    gad_words = index_words(main_pdf)
     print(f"  → regex: {len(main_spec)} spec fields | {len(main_bom)} BOM items")
 
     main_needs_gemini = (len(main_bom) < MIN_BOM_ITEMS or
@@ -766,6 +955,8 @@ def run(main_pdf:str, sub_pdfs:list[str],
         print(warn(f"  Regex weak but no Gemini key — results may be incomplete"))
     else:
         print(inf("  Regex sufficient — Gemini skipped for main PDF"))
+
+    attach_bom_refs(main_bom, gad_words)
 
     # ── Sub PDFs ──────────────────────────────────────────────
     reports = []
@@ -790,7 +981,20 @@ def run(main_pdf:str, sub_pdfs:list[str],
               f"{matched.description if matched else 'NO MATCH'} (score={score:.0f})")
 
         # First-pass validation with regex results
-        results = validate(matched, sub_kv) if matched else []
+        results = validate(matched, sub_kv, gad_words) if matched else []
+
+        # Label-less values: extracted from the drawing but never paired
+        # with a recognized key. Only kept if the exact value is echoed
+        # somewhere in the main GAD -- otherwise there's no precise spot to
+        # point "View" at, so it's dropped rather than shown without one.
+        orphan_tokens = extract_orphan_values(sub_text, sub_kv)
+        orphan_values = []
+        for tok in orphan_tokens:
+            ref = find_value_anywhere(tok, gad_words)
+            if ref:
+                orphan_values.append(OrphanValue(value=tok, gad_ref=ref))
+        print(f"  → {len(orphan_values)} label-less value(s) found in drawing "
+              f"(also in GAD; {len(orphan_tokens) - len(orphan_values)} skipped, no exact GAD match)")
 
         # Step A — targeted Gemini retry for failed fields
         gemini_used = False
@@ -820,7 +1024,7 @@ def run(main_pdf:str, sub_pdfs:list[str],
 
         rep = SubPDFReport(sub_pdf=name, matched_bom_item=matched,
                            results=results, sub_kv=sub_kv,
-                           gemini_used=gemini_used)
+                           gemini_used=gemini_used, orphan_values=orphan_values)
         reports.append(rep)
 
     print_report(main_spec, main_bom, reports, gemini_calls)
