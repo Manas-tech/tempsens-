@@ -539,6 +539,20 @@ def _norm(s:str) -> str:
 # Purely numeric + dimensional separators (x, ×, /)
 _DIM_RE = re.compile(r'^[\d\s×xX\/]+$')
 
+def _plain_size_numbers(s:str) -> Optional[list[float]]:
+    """Return ordered numeric size/tolerance tokens when letters are only
+    dimensional separators. This treats 'Ø12.5±0.1' and '12.5 0.1' as the
+    same value without making codes like 'M10' equal to plain '10'."""
+    cleaned = s.upper()
+    cleaned = cleaned.replace("Ø", " ").replace("⌀", " ").replace("Φ", " ")
+    cleaned = re.sub(r'(?<![A-Z])O\s*(?=\d)', ' ', cleaned)  # OCR/plain O for diameter
+    cleaned = cleaned.replace("±", " ").replace("+/-", " ")
+    cleaned = cleaned.replace("×", "X")
+    if re.search(r'[A-WY-Z]', cleaned):  # allow X only as a dimension separator
+        return None
+    numbers = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', cleaned)]
+    return numbers or None
+
 def _is_dimensional(s:str) -> bool:
     s = s.strip()
     return bool(s) and bool(_DIM_RE.match(s)) and bool(re.search(r'\d', s))
@@ -546,9 +560,12 @@ def _is_dimensional(s:str) -> bool:
 def _dim_sim(a:str, b:str) -> float:
     """Ordered dimensional comparison. Position matters: 50x500x210 ≠ 500x50x210.
     Extracts numbers as floats so '500.0 x 500.0' == '500 x 500'."""
-    na, nb = _norm(a), _norm(b)
-    da = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', na)]
-    db = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', nb)]
+    da = _plain_size_numbers(a)
+    db = _plain_size_numbers(b)
+    if da is None or db is None:
+        na, nb = _norm(a), _norm(b)
+        da = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', na)]
+        db = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', nb)]
     if not da or not db:
         return 0.0
     if da == db:
@@ -596,6 +613,10 @@ _STRICT_FIELDS = {"MATERIAL", "REMARKS"}
 def _field_sim(field:str, a:str, b:str) -> float:
     f = field.upper()
     if f == "SIZE":
+        da = _plain_size_numbers(a)
+        db = _plain_size_numbers(b)
+        if da is not None and db is not None:
+            return _dim_sim(a, b)
         na, nb = _norm(a), _norm(b)
         if _is_dimensional(na) and _is_dimensional(nb):
             return _dim_sim(a, b)
@@ -777,6 +798,8 @@ EQUIVALENCE RULES YOU MUST APPLY:
                "500 x 500 x 210" ≠ "500 x 50 x 210" (wrong number).
                "50 x 500 x 210"  ≠ "500 x 50 x 210" (wrong order).
                Separator style is irrelevant: "500x500x210" == "500 x 500 x 210".
+               Diameter/tolerance symbols are formatting only:
+               "Ø12.5±0.1" == "12.5 0.1" == "O12.5 +/- 0.1".
 5. DESCRIPTION — Partial / abbreviated matches are acceptable if they clearly refer
                to the same component (e.g. "TERMINAL BOX" matches "TB", "TERM. BOX").
 
