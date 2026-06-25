@@ -1,5 +1,5 @@
 """
-PDF Cross-Validator — Streamlit UI
+Drawing Cross-Validator — Streamlit UI
 Run with:  python -m streamlit run app.py
 """
 import streamlit as st
@@ -22,8 +22,8 @@ def _strip(s): return _ANSI.sub('', s)
 
 # ── page config ───────────────────────────────────────────────
 st.set_page_config(
-    page_title="PDF Cross-Validator",
-    page_icon="📋",
+    page_title="Drawing Cross-Validator",
+  page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -35,56 +35,55 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── header ────────────────────────────────────────────────────
-st.title("📋 PDF Cross-Validator")
+st.title("Drawing Cross-Validator")
 st.caption(
-    "Validate component sub-PDFs against a main GAD / BOM drawing · "
+  "Validate component drawings against a main GAD drawing · "
     "regex extraction + Gemini AI"
 )
 
 if not GEMINI_KEY or GEMINI_KEY == "your_key_here":
     st.warning(
         "No Gemini API key found. Add `GEMINI_API_KEY=...` to the `.env` file "
-        "for AI-powered field recovery and final judge.",
-        icon="⚠️",
+      "for AI-powered field recovery and final judge.",
     )
 
 st.divider()
 
 # ── upload ────────────────────────────────────────────────────
-st.header("1️⃣  Upload PDFs")
+st.header("Upload Drawings")
 col_l, col_r = st.columns([1, 2])
 
 with col_l:
-    st.subheader("Main PDF (GAD / BOM)")
+    st.subheader("Main Drawing (GAD)")
     main_file = st.file_uploader("main", type="pdf", label_visibility="collapsed")
     if main_file:
-        st.success(f"✔  {main_file.name}", icon="📄")
+      st.success(main_file.name)
 
 with col_r:
-    st.subheader("Sub-PDFs (component drawings)")
+    st.subheader("Sub Drawings (component drawings)")
     sub_files = st.file_uploader(
         "subs", type="pdf", accept_multiple_files=True,
         label_visibility="collapsed",
     )
     if sub_files:
         for f in sub_files:
-            st.write(f"• {f.name}")
+          st.write(f.name)
 
 st.divider()
 
 # ── options row ───────────────────────────────────────────────
 opt_col, _, run_col = st.columns([1, 2, 1])
 with opt_col:
-    debug_mode = st.checkbox("Debug mode", help="Show all extracted KV fields per sub-PDF")
+    debug_mode = st.checkbox("Debug mode", help="Show all extracted KV fields per sub drawing")
 with run_col:
     ready = main_file is not None and bool(sub_files)
     run_clicked = st.button(
-        "▶  Run Validation", type="primary",
+      "Run Validation", type="primary",
         disabled=not ready, use_container_width=True,
     )
 
 if not ready and "result" not in st.session_state:
-    st.info("⬆️  Upload a main PDF and at least one sub-PDF to begin.")
+    st.info("Upload a main drawing and at least one sub drawing to begin.")
     st.stop()
 
 # ── execute ───────────────────────────────────────────────────
@@ -458,20 +457,20 @@ def _view_in_gad_dialog(ref, label):
     )
 
 # ── results ───────────────────────────────────────────────────
-st.header("2️⃣  Results")
+st.header("Results")
 
 total  = len(reports)
 passed = sum(1 for r in reports if r.overall_pass)
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Sub-PDFs checked", total)
+m1.metric("Sub drawings checked", total)
 m2.metric(
     "Fully passed", f"{passed} / {total}",
     delta="all clear" if passed == total else f"{total - passed} with failures",
     delta_color="off" if passed == total else "inverse",
 )
 m3.download_button(
-    "⬇  Download JSON report",
+  "Download JSON report",
     data=json_bytes,
     file_name="validation_report.json",
     mime="application/json",
@@ -482,22 +481,22 @@ st.divider()
 
 # Main spec
 if main_spec:
-    with st.expander(f"📄 Main PDF — Spec ({len(main_spec)} fields extracted)"):
+    with st.expander(f" Main Drawing — Spec ({len(main_spec)} fields extracted)"):
         spec_df = pd.DataFrame(main_spec.items(), columns=["Field", "Value"])
         st.dataframe(spec_df, use_container_width=True, hide_index=True)
 
 # BOM
 if main_bom:
-    with st.expander(f"📋 Main PDF — BOM ({len(main_bom)} items)"):
+    with st.expander(f" Main Drawing  ({len(main_bom)} items)"):
         bom_df = pd.DataFrame([asdict(b) for b in main_bom])
         st.dataframe(bom_df, use_container_width=True, hide_index=True)
 
-# ── per sub-PDF reports ───────────────────────────────────────
-st.subheader("Sub-PDF Reports")
+# ── per sub drawing reports ───────────────────────────────────
+st.subheader("Sub Drawing Reports")
 
 for rep in reports:
-    icon  = "✅" if rep.overall_pass else "❌"
-    label = f"{icon}  {rep.sub_pdf}"
+    status_text = "Passed" if rep.overall_pass else "Failed"
+    label = f"{status_text}: {rep.sub_pdf}"
 
     with st.expander(label, expanded=True):
         if not rep.matched_bom_item:
@@ -508,7 +507,7 @@ for rep in reports:
         st.caption(f"Matched BOM row **[{b.sr_no}]** — {b.description}")
 
         table_rows = [{
-            "status": "✔ PASS" if r.match else "✗ FAIL",
+          "status": "PASS" if r.match else "FAIL",
             "field": r.field, "expected": r.main_value, "found": r.sub_value,
             "similarity": f"{r.similarity:.0f}%", "gad_ref": r.gad_ref,
         } for r in rep.results]
@@ -526,32 +525,31 @@ for rep in reports:
         # below commented so the column can be restored later if needed.
         # COL_W = [1, 1.3, 2, 2, 1, 1.2]
         hdr_cols = st.columns(COL_W)
-        for col, label in zip(hdr_cols, ["Status", "Field", "Main Drawing ",
-                  "Sub Drawing ", "Similarity"]):
-                  # "PDF Reference"]):
+        for col, label in zip(hdr_cols, ["Status", "Field", "Main Drawing", "Sub Drawing", "Similarity"]):
+          # "PDF Reference"]):
             col.markdown(f"**{label}**")
 
         for i, row in enumerate(table_rows):
-            if row["status"] == "✔ PASS":
-                bg = "#1a4731"
-            elif row["status"] == "✗ FAIL":
-                bg = "#5c1515"
-            else:
-                bg = "#33312a"
+          if row["status"] == "PASS":
+            bg = "#1a4731"
+          elif row["status"] == "FAIL":
+            bg = "#5c1515"
+          else:
+            bg = "#33312a"
 
-            cols = st.columns(COL_W)
-            for col, val in zip(cols[:5], [row["status"], row["field"],
-                                            row["expected"], row["found"], row["similarity"]]):
-                col.markdown(
-                    f"<div style='background:{bg};color:#f0f0f0;padding:6px 8px;"
-                    f"border-radius:4px;margin-bottom:4px'>{val}</div>",
-                    unsafe_allow_html=True,
-                )
+          cols = st.columns(COL_W)
+          values = [row["status"], row["field"], row["expected"], row["found"], row["similarity"]]
+          for col, val in zip(cols[:5], values):
+            col.markdown(
+              f"<div style='background:{bg};color:#f0f0f0;padding:6px 8px;"
+              f"border-radius:4px;margin-bottom:4px'>{val}</div>",
+              unsafe_allow_html=True,
+            )
             # with cols[5]:
             #     # View option intentionally hidden; keep _view_in_gad_dialog and
             #     # render_highlight wired so it can be restored later if needed.
             #     if row["gad_ref"]:
-            #         if st.button("🔍 View", key=f"viewbtn_{rep.sub_pdf}_{i}", use_container_width=True):
+            #         if st.button("View", key=f"viewbtn_{rep.sub_pdf}_{i}", use_container_width=True):
             #             view_label = row["field"] if row["field"] != "-" else f"value: {row['found']}"
             #             _view_in_gad_dialog(row["gad_ref"], view_label)
             #     else:
@@ -569,7 +567,7 @@ for rep in reports:
 
         if rep.orphan_values:
             st.caption(
-                f"🔎 {len(rep.orphan_values)} additional value(s) found in the "
+            f"{len(rep.orphan_values)} additional value(s) found in the "
             "drawing with no matching label — matched against the main GAD above."
             )
 
@@ -579,5 +577,5 @@ for rep in reports:
                 st.dataframe(kv_df, use_container_width=True, hide_index=True)
 
 # Raw log
-with st.expander("🔍 Raw log output"):
+with st.expander("Raw log output"):
     st.code(_strip(res.get("log", "")), language=None)
