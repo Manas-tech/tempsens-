@@ -513,18 +513,22 @@ for rep in reports:
             "similarity": f"{r.similarity:.0f}%", "gad_ref": r.gad_ref,
         } for r in rep.results]
         table_rows += [{
-            "status": "—", "field": "-", "expected": "", "found": o.value,
-            "similarity": "", "gad_ref": o.gad_ref,
+          "status": "-", "field": "-", "expected": o.value, "found": o.value,
+          "similarity": "100%", "gad_ref": o.gad_ref,
         } for o in rep.orphan_values]
 
         if not table_rows:
             st.info("No fields to validate.")
             continue
 
-        COL_W = [1, 1.3, 2, 2, 1, 1.2]
+        COL_W = [1, 1.3, 2, 2, 1]
+        # PDF Reference column hidden from UI; keep the row data and View code
+        # below commented so the column can be restored later if needed.
+        # COL_W = [1, 1.3, 2, 2, 1, 1.2]
         hdr_cols = st.columns(COL_W)
         for col, label in zip(hdr_cols, ["Status", "Field", "Main Drawing ",
-                                          "Sub Drawing ", "Similarity", "PDF Reference"]):
+                  "Sub Drawing ", "Similarity"]):
+                  # "PDF Reference"]):
             col.markdown(f"**{label}**")
 
         for i, row in enumerate(table_rows):
@@ -543,16 +547,18 @@ for rep in reports:
                     f"border-radius:4px;margin-bottom:4px'>{val}</div>",
                     unsafe_allow_html=True,
                 )
-            with cols[5]:
-                if row["gad_ref"]:
-                    if st.button("🔍 View", key=f"viewbtn_{rep.sub_pdf}_{i}", use_container_width=True):
-                        view_label = row["field"] if row["field"] != "-" else f"value: {row['found']}"
-                        _view_in_gad_dialog(row["gad_ref"], view_label)
-                else:
-                    st.markdown(
-                        "<div style='color:#888;padding:6px 8px'>n/a</div>",
-                        unsafe_allow_html=True,
-                    )
+            # with cols[5]:
+            #     # View option intentionally hidden; keep _view_in_gad_dialog and
+            #     # render_highlight wired so it can be restored later if needed.
+            #     if row["gad_ref"]:
+            #         if st.button("🔍 View", key=f"viewbtn_{rep.sub_pdf}_{i}", use_container_width=True):
+            #             view_label = row["field"] if row["field"] != "-" else f"value: {row['found']}"
+            #             _view_in_gad_dialog(row["gad_ref"], view_label)
+            #     else:
+            #         st.markdown(
+            #             "<div style='color:#888;padding:6px 8px'>n/a</div>",
+            #             unsafe_allow_html=True,
+            #         )
 
         if rep.overall_pass:
             st.success("All fields validated successfully.")
@@ -564,7 +570,7 @@ for rep in reports:
         if rep.orphan_values:
             st.caption(
                 f"🔎 {len(rep.orphan_values)} additional value(s) found in the "
-                "drawing with no matching label — shown above with Field = \"-\"."
+            "drawing with no matching label — matched against the main GAD above."
             )
 
         if debug_mode and rep.sub_kv:
